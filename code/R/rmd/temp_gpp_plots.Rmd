@@ -1,0 +1,155 @@
+---
+title: "Plots"
+author: "Selen Ozdogan"
+date: "4/15/2022"
+output: html_document
+---
+
+```{r, include=FALSE}
+setwd("~/Dropbox/land_ineq_degradation/")
+knitr::opts_chunk$set(echo = TRUE)
+library(ggridges)
+library(ggplot2)
+library(viridis)
+library(hrbrthemes)
+library(magrittr)
+library(dplyr)
+library(plotly)
+library(RColorBrewer)
+library(biscale)
+library(janitor)
+library(sf)
+library(cowplot)
+library(gganimate)
+library(animation)
+
+df <- read.csv("data/FR/working_panel.csv")
+df$drop <- runif(nrow(df), 0, 100)
+df <- subset(df, drop > 99)
+
+df %<>% dplyr::select(name_4, adm_can, year, month, mean_temp, month_gpp) %>% arrange(month) %>% mutate(month = month.abb[month])
+```
+
+
+```{r}
+temp <- ggplot(df, aes(x = mean_temp, y = month, group = month, fill = ..x..)) +
+  geom_rect(aes(xmin=-20, xmax=0, ymin="Dec", ymax="Jan"), fill="#E0E0E0") +
+  geom_rect(aes(xmin=25, xmax=40, ymin="Dec", ymax="Jan"), fill="#E0E0E0") +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+  scale_y_discrete(limits = month.abb) +
+  scale_fill_viridis(name = "Temp. [C]", option = "magma") +
+  labs(title = 'Average temperatures, France 2000-2020') +
+  xlab("Temp. [C]") +
+  ylab("") +
+  theme_ipsum() +
+    theme(
+      legend.position="none",
+      panel.spacing = unit(0.1, "lines"),
+      strip.text.x = element_text(size = 8)
+    ) 
+temp
+
+#geom_vline(xintercept = 25) +
+#geom_vline(xintercept = 0) +
+
+```
+
+```{r, echo = FALSE}
+temp_anim <- temp + transition_time(year) +
+  labs(title = "Average temperatures in France, 2000-2020") + 
+  geom_text(aes(x = 32.5, y = "Feb", label = as.factor(year)) , col = "gray", size = 12) 
+animate(temp_anim, rewind = FALSE)
+
+anim_save("temp_anim.gif", animation = last_animation(), path = "~/Dropbox/land_ineq_degradation/figures/descriptives")
+```
+
+```{r}
+df <- subset(df, month_gpp != 0)
+
+gpp <- ggplot(df, aes(x = month_gpp, y = month, group = month, fill = ..x..)) +
+  geom_density_ridges_gradient(scale = 3, rel_min_height = 0.01) +
+  scale_y_discrete(limits = month.abb) +
+  scale_fill_viridis(name = "GPP", option = "magma") +
+  labs(title = 'GPP in France, 2000-2020', x = "GPP", y = "") +
+  theme_ipsum() +
+    theme(
+      legend.position="none",
+      panel.spacing = unit(0.1, "lines"),
+      strip.text.x = element_text(size = 8)
+    )
+gpp
+```
+
+```{r, echo = FALSE}
+gpp_anim <- gpp + transition_time(year) +
+  labs(title = "GPP in France, {frame_time}") 
+
+animate(gpp_anim, rewind = FALSE)
+
+anim_save("gpp_anim.gif", animation = last_animation(), path = "~/Dropbox/land_ineq_degradation/figures/descriptives")
+```
+
+
+```{r}
+color <- colorRampPalette(c("darkorchid3", "darkorange1"))(21)
+df$season <- 1
+df$season[df$month == 'Mar' | df$month == 'Apr' | df$month == 'May'] <-2
+df$season[df$month == 'Jun' | df$month == 'Jul' | df$month == 'Aug'] <-3
+df$season[df$month == 'Sep' | df$month == 'Oct' | df$month == 'Nov'] <-4
+df$yrseason <- paste(df$year, df$season)
+tempyr <- df %>% group_by(yrseason) %>% summarize(mean_temp = mean(mean_temp), season = first(season), year = first(year))
+tempyr$season[tempyr$season == 1] <- "Winter"
+tempyr$season[tempyr$season == 2] <- "Spring"
+tempyr$season[tempyr$season == 3] <- "Summer"
+tempyr$season[tempyr$season == 4] <- "Fall"
+
+tempyrgg <- ggplot(tempyr, aes(x = season, y = mean_temp, group = factor(year), color = factor(year))) +
+  geom_point(size = 5, shape=1) +
+  scale_color_manual(values = c(color)) +
+  labs(title = "Mean temperatures [C] in France", x = "Season", y = "", color = "")
+
+ggplotly(tempyrgg)
+```
+
+```{r}
+xlabels <- sort(unique(df$yrseason))
+xlabels[c(2:20, 22:40, 42:60, 62:80, 82:84)] <- ""
+xlabels %<>% substr(1,4)
+
+tempyrgg2 <- ggplot(tempyr, aes(x = yrseason, y = mean_temp, color = factor(season))) +
+  geom_point() + 
+  scale_x_discrete(labels = xlabels) +
+  labs(title = "Mean temperatures [ºC] in France", x = "", y = "", color = "") 
+
+ggplotly(tempyrgg2)
+```
+
+```{r, include=FALSE}
+gadm4 <- clean_names(read_sf("~/Dropbox/land_ineq_degradation/georeferenced_data/gadm/gadm36_FRA_shp/gadm36_FRA_4.shp"))
+gadm4 <- st_transform(gadm4, "EPSG:2154")
+
+merged <- merge(gadm4, df, all = TRUE)
+merged <- merged[!is.na(merged$mean_temp),]
+merged <- merged[!is.na(merged$month_gpp),]
+biclass <- bi_class(merged, x=month_gpp, y=mean_temp, style = 'quantile', dim = 3)
+```
+
+```{r}
+bismap <- ggplot() +
+  geom_sf(data = biclass, mapping = aes(fill = bi_class), color = "white", size = 0.01, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkBlue", dim = 3) +
+  bi_theme()
+
+legend <- bi_legend(pal = "DkBlue",
+                    dim = 3,
+                    xlab = "Higher GPP",
+                    ylab = "Higher Temp",
+                    size = 8)
+
+finalplot <- ggdraw() +
+  draw_plot(bismap, 0, 0, 1, 1) +
+  draw_plot(legend, 0.75, .65, 0.25, 0.25) +
+  theme(plot.margin=grid::unit(c(-0.07,-0.01,-0.05,-0.05), "null"))
+
+finalplot
+```

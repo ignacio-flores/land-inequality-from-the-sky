@@ -1,0 +1,264 @@
+---
+title: "Matching parcels to farms investigation"
+author: "Selen Ozdogan"
+date: "4/21/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(sf)
+library(lwgeom)
+library(ggplot2)
+library(rgeos)
+library(raster)
+library(rgdal)
+library(polylabelr)
+library(janitor)
+library(terra)
+library(dplyr)
+library(magrittr)
+library(ggpubr)
+library(plotly)
+
+gc()
+setwd("~/Dropbox/land_ineq_degradation")
+sfiles <- "georeferenced_data/cadastre/FR"
+cfiles <- "georeferenced_data/gadm/gadm36_FRA_shp"
+t = 2015
+
+# Read matched file created by R
+matched_raw <- clean_names(read_sf(file.path(sfiles, t, "Rtests/matched.shp")))
+
+# Drop 99% of the data to work faster
+matched_raw$drop <- runif(nrow(matched_raw), 0, 100)
+matched_raw <- matched_raw[matched_raw$drop > 99,]
+
+# Clean missing and duplicated values
+matched_na <- as.numeric(sum(is.na(matched_raw$farm_area)))
+matched_dup <- as.numeric(sum(duplicated(matched_raw$id_parcel)))
+
+matched <- matched_raw[!is.na(matched_raw$farm_area),]
+matched <- matched[!duplicated(matched$id_parcel),]
+
+# Calculate some stats
+matched_count_farm <- as.numeric(length(unique(matched$id_ilot)))
+matched_count_parc <- as.numeric(length(unique(matched$id_parcel)))
+matched_total_farmarea <- sum(matched$parc_area)
+
+# Collapse to farm level
+matched %<>%
+  dplyr::select(id_ilot, surf_parc, parc_area, farm_area) %>%
+  mutate(id_ilot = as.numeric(id_ilot), surf_parc = as.numeric(surf_parc),
+         parc_area = as.numeric(parc_area), farm_area = as.numeric(farm_area)) %>%
+  arrange(id_ilot) %>%
+  group_by(id_ilot) %>%
+  summarise(sum_parc_area = sum(parc_area), sum_surf_parc = sum(surf_parc),
+            farm_area = mean(farm_area), count_parc = n())
+
+# Calculate percent difference between parcel area and surface sum and farm area
+matched$diff_area = ((matched$sum_parc_area - matched$farm_area)/matched$farm_area)*100
+matched$diff_surf = ((matched$sum_surf_parc - (matched$farm_area/10000))/(matched$farm_area/10000))*100
+
+# Collapse to canton level
+gadm4 <- clean_names(read_sf(file.path(cfiles, "gadm36_FRA_4.shp")))
+gadm4 <- st_transform(gadm4, crs(matched))
+matched_canton <- st_join(gadm4, matched, left = TRUE)
+
+# Clean missing values
+matched_canton_na_surf <- as.numeric(sum(is.na(matched_canton$diff_surf)))
+matched_canton_na_area <- as.numeric(sum(is.na(matched_canton$diff_area)))
+
+matched_canton <- matched_canton[!is.na(matched_canton$diff_surf),]
+matched_canton <- matched_canton[!is.na(matched_canton$diff_area),]
+
+matched_canton_count_farm <- as.numeric(length(unique(matched_canton$id_ilot)))
+matched_canton_count_parc <- as.numeric(sum(matched_canton$count_parc))
+
+# Calculate more stats
+matched_sum_parc_surf <- sum(matched_canton$sum_surf_parc)
+matched_avg_parc_surf <- mean(matched_canton$sum_surf_parc)
+
+matched_sum_parc_area <- sum(matched_canton$sum_parc_area)
+matched_avg_parc_area <- mean(matched_canton$sum_parc_area)
+
+# Take average diffs by canton
+matched_cavg <- matched_canton %>%
+  group_by(gid_4) %>%
+  summarise(avg_diff_area = mean(diff_area), avg_diff_surf = mean(diff_surf),
+            count_parc = sum(count_parc), count_farm = n())
+
+# Two more stats
+matched_mean_diffsurf <- mean(matched_cavg$avg_diff_surf)
+matched_mean_diffarea <- mean(matched_cavg$avg_diff_area)
+
+# Create only negative and only positive subsets for plots
+matched_cavg_apos <- matched_cavg[matched_cavg$avg_diff_area > 0,]
+matched_cavg_aneg <- matched_cavg[matched_cavg$avg_diff_area < 0,]
+matched_cavg_spos <- matched_cavg[matched_cavg$avg_diff_surf > 0,]
+matched_cavg_sneg <- matched_cavg[matched_cavg$avg_diff_surf < 0,]
+
+####
+
+# Read matched file created by PyQGIS
+matchedo_raw <- clean_names(read_sf(file.path(sfiles, t, "parcelles_matched_to_ilots.shp")))
+
+# Drop 99% of the data to work faster
+matchedo_raw$drop <- runif(nrow(matchedo_raw), 0, 100)
+matchedo_raw <- matchedo_raw[matchedo_raw$drop > 99,]
+
+# Clean missing and duplicated values
+matchedo_na <- as.numeric(sum(is.na(matchedo_raw$area)))
+matchedo_dup <- as.numeric(sum(duplicated(matchedo_raw$id_parcel)))
+
+matchedo <- matchedo_raw[!is.na(matchedo_raw$area),]
+matchedo <- matchedo[!duplicated(matchedo$id_parcel),]
+
+# Calculate some stats
+matchedo_count_farm <- as.numeric(length(unique(matchedo$id_ilot)))
+matchedo_count_parc <- as.numeric(length(unique(matchedo$id_parcel)))
+matchedo_total_farmarea <- sum(matchedo$area)
+
+# Collapse to farm level
+matchedo %<>%
+  dplyr::select(id_ilot, surf_parc, area) %>%
+  mutate(id_ilot = as.numeric(id_ilot), surf_parc = as.numeric(surf_parc),
+         area = as.numeric(area)) %>%
+  arrange(id_ilot) %>%
+  group_by(id_ilot) %>%
+  summarise(sum_surf_parc = sum(surf_parc), farm_area = mean(area), count_parcel = n())
+
+# Calculate percent difference between parcel surface sum and farm area
+matchedo$diff_surf = ((matchedo$sum_surf_parc - (matchedo$farm_area/10000))/(matchedo$farm_area/10000))*100
+
+# Collapse to canton level
+gadm4 <- st_transform(gadm4, crs(matchedo))
+matchedo_canton <- st_join(gadm4, matchedo, left = TRUE)
+
+# Clean missing values
+matchedo_canton_na <- as.numeric(sum(is.na(matchedo_canton$diff_surf)))
+matchedo_canton <- matchedo_canton[!is.na(matchedo_canton$diff_surf),]
+
+# Calculate more stats
+matchedo_sum_parc_surf <- sum(matchedo_canton$sum_surf_parc)
+matchedo_avg_parc_surf <- mean(matchedo_canton$sum_surf_parc)
+
+matchedo_canton_count_farm <- as.numeric(length(unique(matchedo_canton$id_ilot)))
+matchedo_canton_count_parc <- as.numeric(sum(matchedo_canton$count_parcel))
+
+# Take average diffs by canton
+matchedo_cavg <- matchedo_canton %>% 
+  group_by(gid_4) %>% 
+  summarise(avg_diff_surf = mean(diff_surf), count_farm = n()) 
+
+# One more stats
+matchedo_mean_diffsurf <- mean(matchedo_cavg$avg_diff_surf)
+
+# Create only negative and only positive subsets for plots
+matchedo_cavg_spos <- matchedo_cavg[matchedo_cavg$avg_diff_surf > 0,]
+matchedo_cavg_sneg <- matchedo_cavg[matchedo_cavg$avg_diff_surf < 0,]
+```
+
+# Matched file created by R
+
+### Some stats:
+
+* In the R and QGIS matched files, respectively:
+    + farm_area variable has `r matched_na` and `r matchedo_na` missing values.
+    + id_parcel variable has `r matched_dup` and `r matchedo_dup` duplicated values.
+    + Total farm area is `r matched_total_farmarea` and `r matchedo_total_farmarea`.
+    + There are `r matched_count_farm` and `r matchedo_count_farm` farms.
+    + There are `r matched_count_parc` and `r matchedo_count_parc` parcels.
+
+
+* In the R and QGIS matched files aggregated by canton:
+    + diff_surf variable has `r matched_canton_na_surf` and `r matchedo_canton_na` missing values.
+    + Average difference in surface is `r matched_mean_diffsurf` and `r matchedo_mean_diffsurf`.
+    + Average difference in area is `r matched_mean_diffarea` in the R file.
+    + Total parcel area is `r matched_sum_parc_area` and average parcel area is `r matched_avg_parc_area` in the R file.
+    + Total parcel surface is `r matched_sum_parc_surf` and `r matchedo_sum_parc_surf`.
+    + Average parcel surface is `r matched_avg_parc_surf` and `r matchedo_avg_parc_surf`.
+    + There are `r matched_canton_count_farm` and `r matchedo_canton_count_farm` farms.
+    + There are `r matched_canton_count_parc` and `r matchedo_canton_count_parc` parcels.
+
+## Farm area vs. parcel area percent difference
+
+### All values
+```{r}
+aall <- ggplot(matched_cavg) + geom_sf(aes(fill = avg_diff_area), lwd = 0)
+ggplotly(aall)
+```
+
+### Only positive values
+```{r}
+apos <- ggplot(matched_cavg_apos) + geom_sf(aes(fill = avg_diff_area), lwd = 0)
+ggplotly(apos)
+```
+
+### Only negative values
+```{r}
+aneg <- ggplot(matched_cavg_aneg) + geom_sf(aes(fill = avg_diff_area), lwd = 0)
+ggplotly(aneg)
+```
+
+# Farm area vs. parcel surface percent difference
+
+### All values
+```{r}
+sall <- ggplot(matched_cavg) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(sall)
+```
+
+### Only positive values
+```{r}
+spos <- ggplot(matched_cavg_spos) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(spos)
+```
+
+### Only negative values
+```{r}
+sneg <- ggplot(matched_cavg_sneg) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(sneg)
+```
+
+# Matched file created by QGIS
+
+## Farm area vs. parcel surface percent difference
+
+### All values
+```{r}
+orig_sall <- ggplot(matchedo_cavg) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(orig_sall)
+```
+
+### Only positive values
+```{r}
+orig_spos <- ggplot(matchedo_cavg_spos) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(orig_spos)
+```
+
+### Only negative values
+```{r}
+orig_sneg <- ggplot(matchedo_cavg_sneg) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(orig_sneg)
+```
+
+## Exluding extreme positive values (> 100%)
+
+```{r, include=FALSE}
+matchedo_cavg_100 <- matchedo_cavg[matchedo_cavg$avg_diff_surf <= 100,]
+matchedo_cavg_spos_100 <- matchedo_cavg_spos[matchedo_cavg_spos$avg_diff_surf <= 100,]
+```
+
+### All values
+```{r}
+orig_sall_100 <- ggplot(matchedo_cavg_100) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(orig_sall_100)
+```
+
+### Only positive values
+```{r}
+orig_spos_100 <- ggplot(matchedo_cavg_spos_100) + geom_sf(aes(fill = avg_diff_surf), lwd = 0)
+ggplotly(orig_spos_100)
+```
